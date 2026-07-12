@@ -28,6 +28,9 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))
+
+# Alerting. Without a webhook, alerts are logged (no-op) — demo works with no setup.
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 

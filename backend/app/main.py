@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -7,6 +8,16 @@ from app.api import ingest, query
 from app.core.config import DRIFT_CHECK_INTERVAL_SECONDS, engine
 from app.core.drift import run_drift_check
 from app.models.db import Base
+
+# surface mlgpt.* logs (drift, alerts) through uvicorn, which otherwise ignores
+# non-uvicorn loggers
+_mlgpt_log = logging.getLogger("mlgpt")
+if not _mlgpt_log.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("%(levelname)s:     %(name)s - %(message)s"))
+    _mlgpt_log.addHandler(_h)
+    _mlgpt_log.setLevel(logging.INFO)
+    _mlgpt_log.propagate = False
 
 
 @asynccontextmanager

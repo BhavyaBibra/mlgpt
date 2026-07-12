@@ -131,7 +131,24 @@ def _check_model(db: Session, model_id: str) -> None:
         ))
         db.commit()
     if flagged_features or perf_decay:
-        _open_incident_if_needed(db, model_id, flagged_features, perf_decay)
+        opened = _open_incident_if_needed(db, model_id, flagged_features, perf_decay)
+        if opened is not None:
+            _explain_and_alert(db, opened)
+
+
+def _explain_and_alert(db: Session, incident) -> None:
+    """Auto-generate the cited explanation for a freshly-opened incident and send
+    the alert with it attached. Lazy imports avoid a context<->drift cycle;
+    failures here must never break the drift loop."""
+    try:
+        from app.core.alerts import send_incident_alert
+        from app.core.explanations import ensure_explanation
+        explanation, _created, _src = ensure_explanation(db, incident.id)
+        if explanation is not None:
+            send_incident_alert(incident, explanation)
+    except Exception:  # alerting/explaining is best-effort
+        import logging
+        logging.getLogger("mlgpt.drift").exception("explain/alert failed")
 
 
 def _performance_decayed(db: Session, model_id: str, window_start, now) -> dict | None:
@@ -153,13 +170,14 @@ def _performance_decayed(db: Session, model_id: str, window_start, now) -> dict 
 
 def _open_incident_if_needed(db: Session, model_id: str,
                              flagged: list[tuple[str, float]],
-                             perf_decay: dict | None = None) -> None:
-    """One open incident per model at a time (dedup/cooldown)."""
+                             perf_decay: dict | None = None) -> Incident | None:
+    """Open one incident per model at a time (dedup/cooldown). Returns the newly
+    opened Incident, or None if one was already open."""
     existing = db.execute(
         select(Incident).where(Incident.model_id == model_id, Incident.status == "open")
     ).scalar_one_or_none()
     if existing:
-        return
+        return None
     if flagged:
         worst = max(flagged, key=lambda t: t[1])
         summary = (f"Drift detected in {len(flagged)} feature(s); worst: "
@@ -169,5 +187,7 @@ def _open_incident_if_needed(db: Session, model_id: str,
         summary = (f"Performance decay: accuracy {perf_decay['baseline_acc']:.2f} "
                    f"-> {perf_decay['recent_acc']:.2f} with no input drift flagged")
         severity = "critical" if perf_decay["acc_drop"] >= 2 * PERF_ACC_DROP else "warning"
-    db.add(Incident(model_id=model_id, severity=severity, trigger_summary=summary))
+    incident = Incident(model_id=model_id, severity=severity, trigger_summary=summary)
+    db.add(incident)
     db.commit()
+    return incident
