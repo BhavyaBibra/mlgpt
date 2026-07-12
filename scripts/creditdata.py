@@ -110,9 +110,22 @@ def regime_batch(model, feats, live_pool, regime, n, rng):
     if regime == "deploy_bug":
         # Bug shipped in v2.3: a rewrite of the repayment-status preprocessing
         # flattens every PAY_* code to 0 ("paid on time"). This block is the
-        # model's strongest signal, so predictions collapse.
+        # model's strongest signal, so predictions collapse. (value collapse)
         for k in range(1, 7):
             X_seen[f"pay_status_{k}"] = 0
+    elif regime == "deploy_scale":
+        # A different shipped bug: an encoding change inverts the repayment-status
+        # codes (late<->on-time), then shifts them. Distribution moves hard (high
+        # PSI) with its spread intact (no collapse, no nulls), and because the
+        # relationship is reversed the model's ranking breaks. Fingerprint:
+        # deploy/pipeline corruption, not a data-quality null/collapse.
+        for k in range(1, 7):
+            X_seen[f"pay_status_{k}"] = 4 - X_seen[f"pay_status_{k}"]
+    elif regime == "null_spike":
+        # An upstream join breaks and the recent bill-statement fields arrive
+        # empty for most rows — a null spike PSI can't see.
+        mask = rng.random(len(X_seen)) < 0.7
+        X_seen.loc[X_seen.index[mask], "bill_amt_1"] = np.nan
 
     proba = model.predict_proba(X_seen)[:, 1]
     metrics = {

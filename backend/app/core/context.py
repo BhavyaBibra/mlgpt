@@ -109,38 +109,38 @@ def classify_signature(signals: dict) -> dict:
     big_input_drift = max_psi >= 1.0
     auc_collapsed = auc_delta >= 0.03
     auc_held = auc_delta < 0.02
-    quality_flag = any(
-        (s.get("post_null_rate", 0) >= 0.3) or (s.get("post_mode_share", 0) >= 0.9)
-        for s in shifts
-    )
 
-    if big_input_drift and (auc_collapsed or quality_flag):
-        label = "data_quality" if quality_flag else "deploy_or_pipeline"
-        if deploy_correlates:
-            conf, why = "high", (
-                f"A feature's distribution broke (PSI {max_psi:.1f}) and AUC fell "
-                f"{auc_delta:.3f}, {abs(deploy):.1f}h "
-                f"{'after' if deploy <= 0 else 'before'} a deploy event"
-                + (" with a null spike / value collapse" if quality_flag else "")
-                + " — a shipped change, not a changed world."
-            )
-        else:
-            conf, why = "medium", (
-                f"Feature broke (PSI {max_psi:.1f}) and AUC fell {auc_delta:.3f}, "
-                f"but no deploy event correlates — likely a pipeline/data-quality "
-                f"break; check upstream sources."
-            )
+    null_feats = [s["feature"] for s in shifts if s.get("post_null_rate", 0) >= 0.3]
+    collapse_feats = [s["feature"] for s in shifts if s.get("post_mode_share", 0) >= 0.9]
+
+    dep_txt = (f"{abs(deploy):.1f}h {'after' if deploy <= 0 else 'before'} a deploy event"
+               if deploy_correlates else "no deploy event correlates")
+
+    # data-quality break (null spike / value collapse) is the most specific
+    # signal, so it wins — and it is always a shipped/pipeline problem, not the
+    # world changing.
+    if null_feats or collapse_feats:
+        kind = "null spike" if null_feats else "value collapse"
+        feats = (null_feats or collapse_feats)[:3]
+        label = "data_quality"
+        conf = "high" if deploy_correlates else "medium"
+        why = (f"Data-quality break: {kind} in {', '.join(feats)} "
+               f"(PSI up to {max_psi:.1f}), {dep_txt} — a shipped/pipeline change, "
+               f"not a changed world.")
+    elif big_input_drift and auc_collapsed:
+        label = "deploy_or_pipeline"
+        conf = "high" if deploy_correlates else "medium"
+        why = (f"A feature's distribution broke (PSI {max_psi:.1f}) and AUC fell "
+               f"{auc_delta:.3f}, {dep_txt} — a shipped change corrupted an input.")
     elif not big_input_drift and auc_held and acc_delta >= 0.03:
         label, conf, why = "world_change", "medium", (
             f"Accuracy fell {acc_delta:.3f} while AUC held ({auc_delta:+.3f}) with "
             f"no single-feature input drift (max PSI {max_psi:.2f}) and no deploy "
-            f"nearby — the population/relationship changed, not the pipeline."
-        )
+            f"nearby — the population/relationship changed, not the pipeline.")
     else:
         label, conf, why = "ambiguous", "low", (
             f"Signals are mixed (max PSI {max_psi:.2f}, AUC Δ {auc_delta:.3f}, "
-            f"accuracy Δ {acc_delta:.3f}) — needs a human look."
-        )
+            f"accuracy Δ {acc_delta:.3f}) — needs a human look.")
     return {"label": label, "confidence": conf, "rationale": why}
 
 
@@ -154,10 +154,14 @@ def assemble_incident_context(db: Session, incident_id: int) -> dict | None:
 
     window_end, reports = _drift_snapshot(db, model_id, opened)
     window_end = _naive(window_end)
-    flagged = sorted([r for r in reports if r.flagged and r.feature != "__prediction__"],
+    flagged = sorted([r for r in reports
+                      if r.flagged and r.metric == "psi" and r.feature != "__prediction__"],
                      key=lambda r: r.value, reverse=True)
+    null_flagged = [r for r in reports if r.flagged and r.metric == "null_rate"]
+    perf_report = next((r for r in reports if r.metric == "perf_decay" and r.flagged), None)
     onset = _naive(reports[0].window_start) if reports else opened
-    pred_drift = next((r.value for r in reports if r.feature == "__prediction__"), None)
+    pred_drift = next((r.value for r in reports
+                       if r.feature == "__prediction__" and r.metric == "psi"), None)
 
     # events within +/-48h of drift onset, with signed hours (negative = before)
     ev_lo, ev_hi = onset - timedelta(hours=EVENT_WINDOW_HOURS), onset + timedelta(hours=EVENT_WINDOW_HOURS)
@@ -181,11 +185,13 @@ def assemble_incident_context(db: Session, incident_id: int) -> dict | None:
     acc_delta = (pre["accuracy"] - post["accuracy"]) if pre and post else None
 
     top = [r.feature for r in flagged[:TOP_FEATURES]]
-    shifts = _feature_shifts(model_id, top, onset, window_end or _now(), db)
+    null_feats = [r.feature for r in null_flagged if r.feature not in top]
+    shifts = _feature_shifts(model_id, top + null_feats, onset, window_end or _now(), db)
 
     signals = {
         "max_psi": round(max((r.value for r in flagged), default=0.0), 3),
         "n_features_drifted": len(flagged),
+        "n_null_spikes": len(null_flagged),
         "prediction_drift_psi": round(pred_drift, 3) if pred_drift is not None else None,
         "auc_delta": round(auc_delta, 4) if auc_delta is not None else None,
         "accuracy_delta": round(acc_delta, 4) if acc_delta is not None else None,
@@ -202,14 +208,19 @@ def assemble_incident_context(db: Session, incident_id: int) -> dict | None:
             "onset": onset, "window_end": window_end,
             "flagged_features": [
                 {"report_id": r.id, "feature": r.feature, "metric": r.metric,
-                 "psi": r.value, "threshold": r.threshold} for r in flagged
+                 "value": r.value, "threshold": r.threshold} for r in flagged
+            ],
+            "null_spikes": [
+                {"report_id": r.id, "feature": r.feature, "null_rate": r.value}
+                for r in null_flagged
             ],
             "prediction_drift_psi": signals["prediction_drift_psi"],
         },
         "events": {"nearest_deploy": nearest_deploy, "within_48h": event_list},
         "performance": {"pre": pre, "post": post,
                         "auc_delta": signals["auc_delta"],
-                        "accuracy_delta": signals["accuracy_delta"]},
+                        "accuracy_delta": signals["accuracy_delta"],
+                        "report_id": perf_report.id if perf_report else None},
         "signals": signals,
         "signature": classify_signature(signals),
     }

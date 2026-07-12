@@ -7,11 +7,12 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
+from app.core.agent import generate_explanation
 from app.core.config import get_db
 from app.core.context import assemble_incident_context
 from app.core.drift import save_reference
 from app.core.performance import compute_window, performance_timeseries
-from app.models.db import DriftReport, Event, Incident, Prediction
+from app.models.db import DriftReport, Event, Explanation, Incident, Prediction
 
 router = APIRouter(tags=["query"])
 
@@ -90,6 +91,50 @@ def incident_context(incident_id: int, db: Session = Depends(get_db)):
     if ctx is None:
         raise HTTPException(404, "incident not found")
     return ctx
+
+
+def _serialize_explanation(e: Explanation) -> dict:
+    return {
+        "id": e.id, "incident_id": e.incident_id, "ts": e.ts,
+        "summary": e.summary, "root_cause": e.root_cause, "evidence": e.evidence,
+        "confidence": e.confidence, "suggested_action": e.suggested_action,
+    }
+
+
+@router.post("/incidents/{incident_id}/explain")
+def explain_incident(incident_id: int, db: Session = Depends(get_db)):
+    """Generate + store the cited root-cause explanation. Idempotent: an incident
+    keeps its first explanation (deterministic, auditable history)."""
+    existing = db.execute(
+        select(Explanation).where(Explanation.incident_id == incident_id)
+        .order_by(Explanation.id).limit(1)
+    ).scalar_one_or_none()
+    if existing:
+        return _serialize_explanation(existing)
+
+    ctx = assemble_incident_context(db, incident_id)
+    if ctx is None:
+        raise HTTPException(404, "incident not found")
+    result = generate_explanation(ctx)
+    row = Explanation(
+        incident_id=incident_id, summary=result["summary"],
+        root_cause=result["root_cause"], evidence=result["evidence"],
+        confidence=result["confidence"], suggested_action=result["suggested_action"],
+    )
+    db.add(row)
+    db.commit()
+    return _serialize_explanation(row) | {"_source": result.get("_source")}
+
+
+@router.get("/incidents/{incident_id}/explanation")
+def get_explanation(incident_id: int, db: Session = Depends(get_db)):
+    row = db.execute(
+        select(Explanation).where(Explanation.incident_id == incident_id)
+        .order_by(Explanation.id).limit(1)
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, "no explanation yet; POST /explain first")
+    return _serialize_explanation(row)
 
 
 @router.get("/models/{model_id}/performance")
