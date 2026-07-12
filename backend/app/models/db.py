@@ -93,3 +93,16 @@ class Explanation(Base):
     evidence: Mapped[list] = mapped_column(JSON, default=list)   # [{type, ref_id, detail}]
     confidence: Mapped[str] = mapped_column(String(16), default="medium")
     suggested_action: Mapped[str] = mapped_column(Text, default="")
+
+
+class QaLog(Base):
+    """Natural-language Q&A history ('Ask MLGPT'). Cited answers over incidents."""
+    __tablename__ = "qa_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    session_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    model_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    question: Mapped[str] = mapped_column(Text)
+    answer: Mapped[str] = mapped_column(Text)
+    citations: Mapped[list] = mapped_column(JSON, default=list)   # [{type, ref}]

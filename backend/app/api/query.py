@@ -4,6 +4,7 @@ import io
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from pydantic import BaseModel
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
@@ -11,8 +12,9 @@ from app.core.config import get_db
 from app.core.context import assemble_incident_context
 from app.core.drift import save_reference
 from app.core.explanations import ensure_explanation, get_explanation
+from app.core.nlquery import ask
 from app.core.performance import compute_window, performance_timeseries
-from app.models.db import DriftReport, Event, Explanation, Incident, Prediction
+from app.models.db import DriftReport, Event, Explanation, Incident, Prediction, QaLog
 
 router = APIRouter(tags=["query"])
 
@@ -127,6 +129,31 @@ def get_performance(model_id: str, buckets: int = 12, db: Session = Depends(get_
         "overall": compute_window(db, model_id),
         "timeline": performance_timeseries(db, model_id, buckets=buckets),
     }
+
+
+class AskIn(BaseModel):
+    question: str
+    model_id: str | None = None
+    session_id: str | None = None
+
+
+@router.post("/ask")
+def ask_mlgpt(body: AskIn, db: Session = Depends(get_db)):
+    """Ask MLGPT a natural-language question; get a cited answer over incidents."""
+    return ask(db, body.question, body.model_id, body.session_id)
+
+
+@router.get("/ask/history")
+def ask_history(session_id: str | None = None, limit: int = 50,
+                db: Session = Depends(get_db)):
+    q = select(QaLog).order_by(desc(QaLog.ts)).limit(limit)
+    if session_id:
+        q = q.where(QaLog.session_id == session_id)
+    return [
+        {"ts": r.ts, "model_id": r.model_id, "question": r.question,
+         "answer": r.answer, "citations": r.citations}
+        for r in db.execute(q).scalars().all()
+    ]
 
 
 @router.get("/models/{model_id}/events")
