@@ -33,13 +33,15 @@ def init(api_url: str = "http://localhost:8000", model_id: str = "default",
 
 def log_prediction(features: dict, prediction: float,
                    model_id: str | None = None, model_version: str | None = None,
-                   ts: datetime | None = None) -> None:
+                   ext_id: str | None = None, ts: datetime | None = None) -> None:
     item = {
         "model_id": model_id or _config["model_id"],
         "features": features,
         "prediction": float(prediction),
         "model_version": model_version or _config["model_version"],
     }
+    if ext_id is not None:
+        item["ext_id"] = str(ext_id)
     if ts:
         item["ts"] = ts.isoformat()
     with _lock:
@@ -48,10 +50,28 @@ def log_prediction(features: dict, prediction: float,
             _flush_locked()
 
 
-def log_actual(prediction_id: int, actual: float) -> None:
-    httpx.post(f"{_config['api_url']}/ingest/actuals",
-               json=[{"prediction_id": prediction_id, "actual": float(actual)}],
-               timeout=10)
+def log_actual(actual: float, prediction_id: int | None = None,
+               ext_id: str | None = None, model_id: str | None = None) -> None:
+    """Attach ground truth by our row id, or by the (model_id, ext_id) you
+    tagged the prediction with."""
+    log_actuals([{"actual": actual, "prediction_id": prediction_id,
+                  "ext_id": ext_id, "model_id": model_id}])
+
+
+def log_actuals(items: list[dict]) -> dict:
+    """Batch ground-truth logging. Each item: {actual, and prediction_id or
+    (ext_id[, model_id])}. model_id defaults to the init() model."""
+    payload = []
+    for a in items:
+        row = {"actual": float(a["actual"])}
+        if a.get("prediction_id") is not None:
+            row["prediction_id"] = a["prediction_id"]
+        else:
+            row["ext_id"] = str(a["ext_id"])
+            row["model_id"] = a.get("model_id") or _config["model_id"]
+        payload.append(row)
+    r = httpx.post(f"{_config['api_url']}/ingest/actuals", json=payload, timeout=60)
+    return r.json()
 
 
 def log_event(description: str, kind: str = "note",

@@ -28,8 +28,14 @@ class Prediction(Base):
     features: Mapped[dict] = mapped_column(JSON)
     prediction: Mapped[float] = mapped_column(Float)
     model_version: Mapped[str] = mapped_column(String(64), default="unknown")
+    # client-supplied correlation id, so ground truth can be attached later
+    # without the SDK needing a synchronous round-trip to learn our row id
+    ext_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
-    __table_args__ = (Index("ix_pred_model_ts", "model_id", "ts"),)
+    __table_args__ = (
+        Index("ix_pred_model_ts", "model_id", "ts"),
+        Index("ix_pred_model_ext", "model_id", "ext_id"),
+    )
 
 
 class Actual(Base):
