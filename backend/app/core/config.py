@@ -14,6 +14,10 @@ NULL_RATE_THRESHOLD = float(os.getenv("NULL_RATE_THRESHOLD", "0.25"))
 PERF_ACC_DROP = float(os.getenv("PERF_ACC_DROP", "0.03"))
 PERF_AUC_DROP = float(os.getenv("PERF_AUC_DROP", "0.03"))
 PERF_MIN_LABELED = int(os.getenv("PERF_MIN_LABELED", "100"))
+# require drift to persist across N consecutive checks before opening an incident.
+# 1 = open on first detection (batch demo/tests). >1 debounces flicker in a live
+# stream so the incident opens once the signal is established (cleaner diagnosis).
+DRIFT_MIN_CONSECUTIVE = int(os.getenv("DRIFT_MIN_CONSECUTIVE", "1"))
 DRIFT_WINDOW_MINUTES = int(os.getenv("DRIFT_WINDOW_MINUTES", "10"))
 MIN_ROWS_FOR_DRIFT = int(os.getenv("MIN_ROWS_FOR_DRIFT", "100"))
 

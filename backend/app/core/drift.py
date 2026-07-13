@@ -14,9 +14,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import (
-    DRIFT_WINDOW_MINUTES, MIN_ROWS_FOR_DRIFT, NULL_RATE_THRESHOLD,
-    PERF_ACC_DROP, PERF_AUC_DROP, PERF_MIN_LABELED, PSI_THRESHOLD, SessionLocal,
+    DRIFT_MIN_CONSECUTIVE, DRIFT_WINDOW_MINUTES, MIN_ROWS_FOR_DRIFT,
+    NULL_RATE_THRESHOLD, PERF_ACC_DROP, PERF_AUC_DROP, PERF_MIN_LABELED,
+    PSI_THRESHOLD, SessionLocal,
 )
+
+# consecutive-check drift streak per model (in-memory debounce)
+_drift_streak: dict[str, int] = {}
 from app.core.performance import compute_window
 from app.models.db import DriftReport, Incident, Prediction
 
@@ -120,6 +124,15 @@ def _check_model(db: Session, model_id: str) -> None:
     db.commit()
 
     perf_decay = _performance_decayed(db, model_id, window_start, now)
+
+    # debounce: require the signal to persist so a live stream's incident opens
+    # once drift is established (window drift-dominated) rather than on the first
+    # diluted flicker
+    has_signal = bool(flagged_features or perf_decay)
+    _drift_streak[model_id] = _drift_streak.get(model_id, 0) + 1 if has_signal else 0
+    if has_signal and _drift_streak[model_id] < DRIFT_MIN_CONSECUTIVE:
+        return
+
     if perf_decay:
         # record the decay as a citable evidence row — for concept/world drift
         # this is the ONLY real signal, so the agent must be able to cite it

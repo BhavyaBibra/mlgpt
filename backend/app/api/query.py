@@ -122,6 +122,20 @@ def read_explanation(incident_id: int, db: Session = Depends(get_db)):
     return _serialize_explanation(row)
 
 
+@router.get("/models/{model_id}/recent")
+def recent_predictions(model_id: str, limit: int = 15, db: Session = Depends(get_db)):
+    """Newest predictions — powers the live 'data flowing through' feed."""
+    rows = db.execute(
+        select(Prediction).where(Prediction.model_id == model_id)
+        .order_by(desc(Prediction.id)).limit(limit)
+    ).scalars().all()
+    return [
+        {"id": r.id, "ts": r.ts, "prediction": round(r.prediction, 4),
+         "model_version": r.model_version}
+        for r in rows
+    ]
+
+
 @router.get("/models/{model_id}/performance")
 def get_performance(model_id: str, buckets: int = 12, db: Session = Depends(get_db)):
     """Accuracy/AUC timeline (labelled traffic only) + an overall summary."""

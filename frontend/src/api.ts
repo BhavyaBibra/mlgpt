@@ -93,6 +93,10 @@ export const api = {
   explanation: (id: number) => get<Explanation>(`/incidents/${id}/explanation`),
   ensureExplanation: (id: number) => post<Explanation>(`/incidents/${id}/explain`, {}),
   context: (id: number) => get<IncidentContext>(`/incidents/${id}/context`),
+  recent: (m: string, limit = 14) =>
+    get<{ id: number; ts: string; prediction: number; model_version: string }[]>(
+      `/models/${m}/recent?limit=${limit}`
+    ),
   performance: (m: string) => get<Performance>(`/models/${m}/performance?buckets=12`),
   events: (m: string) => get<{ id: number; ts: string; kind: string; description: string }[]>(`/models/${m}/events`),
   ask: (question: string, model_id?: string) => post<AskAnswer>("/ask", { question, model_id }),

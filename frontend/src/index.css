@@ -32,6 +32,22 @@ body,
   animation: pulseGlow 1.4s ease-in-out infinite;
 }
 
+/* new live-feed rows slide + fade in, with a brief teal flash */
+@keyframes feedIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+    background: rgba(45, 212, 191, 0.14);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.feed-row {
+  animation: feedIn 0.5s ease-out;
+}
+
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;

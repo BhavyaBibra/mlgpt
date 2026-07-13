@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CartesianGrid, Line, LineChart, ReferenceArea, ReferenceLine,
   ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -28,23 +28,62 @@ export default function App() {
   const [perf, setPerf] = useState<Performance | null>(null);
   const [events, setEvents] = useState<{ id: number; ts: string; kind: string; description: string }[]>([]);
   const [highlight, setHighlight] = useState<Highlight>(null);
+  const [recent, setRecent] = useState<{ id: number; ts: string; prediction: number; model_version: string }[]>([]);
+  const [rate, setRate] = useState(0);
+  const rateRef = useRef<{ count: number; t: number } | null>(null);
 
+  // one-time bootstrap: pick the first model + its latest incident
   useEffect(() => {
-    Promise.all([api.models(), api.incidents()]).then(([m, inc]) => {
+    api.models().then((m) => {
       setModels(m);
-      setIncidents(inc);
-      const firstModel = m[0]?.model_id ?? null;
-      setModel(firstModel);
-      const firstIncident = inc.find((i) => i.model_id === firstModel) ?? inc[0] ?? null;
-      setIncident(firstIncident);
+      const first = m[0]?.model_id ?? null;
+      setModel(first);
     }).catch(() => {});
   }, []);
 
+  // live loop — poll everything so the dashboard visibly moves
   useEffect(() => {
-    if (!model) return;
-    api.performance(model).then(setPerf).catch(() => {});
-    api.events(model).then(setEvents).catch(() => {});
+    let alive = true;
+    const tick = async () => {
+      try {
+        const [m, inc] = await Promise.all([api.models(), api.incidents()]);
+        if (!alive) return;
+        setModels(m);
+        setIncidents(inc);
+        const mid = model ?? m[0]?.model_id ?? null;
+        if (mid && !model) setModel(mid);
+        setIncident((cur) => cur ?? inc.find((i) => i.model_id === mid) ?? null);
+
+        // throughput (predictions/sec) from the total count delta
+        const total = m.reduce((s, x) => s + x.predictions, 0);
+        const now = Date.now();
+        if (rateRef.current) {
+          const dt = (now - rateRef.current.t) / 1000;
+          const dc = total - rateRef.current.count;
+          if (dt > 0) setRate(Math.max(0, dc / dt));
+        }
+        rateRef.current = { count: total, t: now };
+
+        if (mid) {
+          const [r, p] = await Promise.all([api.recent(mid), api.performance(mid)]);
+          if (!alive) return;
+          setRecent(r);
+          setPerf(p);
+          if (!events.length) api.events(mid).then(setEvents).catch(() => {});
+        }
+      } catch { /* ignore transient errors */ }
+    };
+    tick();
+    const id = setInterval(tick, 1600);
+    return () => { alive = false; clearInterval(id); };
   }, [model]);
+
+  // when an incident appears/changes, load its explanation + context
+  useEffect(() => {
+    if (incident) return;
+    const match = incidents.find((i) => i.model_id === model) ?? null;
+    if (match) setIncident(match);
+  }, [incidents, model]);
 
   useEffect(() => {
     if (!incident) { setExplanation(null); setCtx(null); return; }
@@ -60,11 +99,14 @@ export default function App() {
         setIncident(incidents.find((i) => i.model_id === m) ?? null);
       }} />
       <main className="flex-1 overflow-y-auto p-6" style={{ minWidth: 0 }}>
-        <Header incidents={incidents} models={models} />
+        <div className="flex items-start justify-between gap-4 flex-wrap mb-5">
+          <Header incidents={incidents} models={models} />
+          <LiveBar rate={rate} />
+        </div>
         {model && perf && (
           <Detail
             model={model} perf={perf} events={events} incident={incident}
-            explanation={explanation} ctx={ctx}
+            explanation={explanation} ctx={ctx} recent={recent}
             highlight={highlight} setHighlight={setHighlight}
           />
         )}
@@ -99,18 +141,70 @@ function Header({ incidents, models }: { incidents: Incident[]; models: Model[] 
   const open = incidents.filter((i) => i.status === "open").length;
   const preds = models.reduce((s, m) => s + m.predictions, 0);
   return (
-    <div className="flex items-center gap-8 mb-6">
+    <div className="flex items-center gap-8">
       <Stat label="Models watched" value={models.length} />
       <Stat label="Active incidents" value={open} color={open ? C.red : C.green} />
-      <Stat label="Predictions logged" value={preds.toLocaleString()} />
+      <Stat label="Predictions logged" value={preds} format={(v) => v.toLocaleString()} />
     </div>
   );
 }
-function Stat({ label, value, color }: { label: string; value: any; color?: string }) {
+function Stat({ label, value, color, format }:
+  { label: string; value: number; color?: string; format?: (v: number) => string }) {
+  const [flash, setFlash] = useState(false);
+  const prev = useRef(value);
+  useEffect(() => {
+    if (prev.current !== value) { setFlash(true); const t = setTimeout(() => setFlash(false), 700); prev.current = value; return () => clearTimeout(t); }
+  }, [value]);
   return (
     <div>
-      <div className="text-2xl font-semibold" style={{ color: color ?? C.text }}>{value}</div>
+      <div className="text-2xl font-semibold transition-colors" style={{ color: flash ? C.teal : color ?? C.text }}>
+        {format ? format(value) : value}
+      </div>
       <div className="text-xs" style={{ color: C.muted }}>{label}</div>
+    </div>
+  );
+}
+
+function LiveBar({ rate }: { rate: number }) {
+  const live = rate > 0.01;
+  return (
+    <div className="flex items-center gap-4 rounded-lg border px-3 py-2"
+      style={{ borderColor: C.border, background: C.panel }}>
+      <span className="flex items-center gap-2">
+        <span className={live ? "glow" : ""}
+          style={{ width: 9, height: 9, borderRadius: 999, background: live ? C.green : C.muted, display: "inline-block" }} />
+        <span className="text-xs font-semibold tracking-wider" style={{ color: live ? C.green : C.muted }}>
+          {live ? "LIVE" : "IDLE"}
+        </span>
+      </span>
+      <span className="text-xs mono" style={{ color: C.muted }}>
+        <span style={{ color: C.text }}>{rate.toFixed(1)}</span> pred/s
+      </span>
+    </div>
+  );
+}
+
+function LiveFeed({ recent }: { recent: { id: number; ts: string; prediction: number; model_version: string }[] }) {
+  if (!recent.length) return <div className="text-sm" style={{ color: C.muted }}>Waiting for traffic… run scripts/stream.py</div>;
+  return (
+    <div className="flex flex-col gap-1" style={{ maxHeight: 230, overflow: "hidden" }}>
+      {recent.map((r) => {
+        const risk = r.prediction;
+        const col = risk >= 0.6 ? C.red : risk >= 0.35 ? C.amber : C.green;
+        return (
+          <div key={r.id} className="feed-row flex items-center gap-3 rounded px-2 py-1"
+            style={{ background: C.panel2 }}>
+            <span className="mono text-[11px]" style={{ color: C.muted, width: 44 }}>#{r.id}</span>
+            <span className="mono text-[11px]" style={{ color: C.muted, width: 30 }}>v{r.model_version}</span>
+            <div className="flex-1 h-1.5 rounded" style={{ background: "#161b25" }}>
+              <div className="h-1.5 rounded" style={{ width: `${Math.round(risk * 100)}%`, background: col }} />
+            </div>
+            <span className="mono text-[11px]" style={{ color: col, width: 44, textAlign: "right" }}>
+              {(risk * 100).toFixed(0)}%
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -118,14 +212,19 @@ function Stat({ label, value, color }: { label: string; value: any; color?: stri
 function Detail(props: {
   model: string; perf: Performance; events: any[]; incident: Incident | null;
   explanation: Explanation | null; ctx: IncidentContext | null;
+  recent: { id: number; ts: string; prediction: number; model_version: string }[];
   highlight: Highlight; setHighlight: (h: Highlight) => void;
 }) {
-  const { perf, events, incident, explanation, ctx, highlight, setHighlight } = props;
+  const { perf, events, incident, explanation, ctx, recent, highlight, setHighlight } = props;
   const deploy = events.find((e) => e.kind === "deploy");
   const onset = ctx?.drift.onset;
 
   return (
     <div className="grid gap-6" style={{ gridTemplateColumns: "1fr" }}>
+      <Panel title="Live predictions" subtitle="streaming in · risk score">
+        <LiveFeed recent={recent} />
+      </Panel>
+
       <Panel title="Accuracy over time" subtitle="deploy markers + incident region">
         <AccuracyChart perf={perf} deployTs={deploy?.ts} onset={onset} highlight={highlight} />
       </Panel>
